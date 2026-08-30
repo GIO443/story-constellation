@@ -1,0 +1,193 @@
+# rubric.yaml
+#
+# Single source of truth. The writer is briefed from this file and the
+# supervisors evaluate against this file. If they diverge, critiques stop
+# being actionable: the writer gets told to fix something it was never
+# asked to do. One artifact, two consumers.
+
+audience:
+  ages: "5 to 10"
+  read_aloud: true
+  target_length_words: [400, 700]
+
+# ---------------------------------------------------------------------------
+# CRAFT: what the writer is told before drafting.
+# Each block below is rendered into the writer's system prompt.
+# ---------------------------------------------------------------------------
+
+craft:
+  voice:
+    - Write to be read aloud by an adult. Rhythm and sentence music matter.
+    - Concrete sensory detail over abstraction. A child should be able to picture every scene.
+    - Short sentences for action. Longer ones for calm.
+    - Name the protagonist early and keep the cast small: two or three characters.
+
+  language:
+    - Everyday vocabulary a 7-year-old already owns.
+    - At most two stretch words, and only where context makes the meaning obvious.
+    - Avoid idioms and figures of speech that require cultural knowledge to parse.
+
+  arc:
+    description: >
+      Five beats. Every story hits all five. The proportions shift by category
+      but the skeleton does not.
+    beats:
+      - id: ordinary_world
+        purpose: Establish who the character is and what they want or fear.
+      - id: disruption
+        purpose: Something changes. The want becomes urgent or the fear becomes real.
+      - id: attempt_and_setback
+        purpose: The character tries and it does not work. This beat is what makes the ending earned.
+      - id: turn
+        purpose: The character does something differently, usually because of what they learned.
+      - id: resolution
+        purpose: The situation closes. The reader knows the character is safe and changed.
+
+  moral:
+    description: >
+      The lesson must be enacted, never announced. If the final paragraph
+      explains the moral, the story has failed at the thing it was trying to do.
+    enacted_means:
+      - The character's choice at the turn demonstrates the lesson.
+      - Consequences in the story world show why the choice mattered.
+      - The reader can state the lesson without the story stating it.
+    forbidden:
+      - "And so <character> learned that..."
+      - "The moral of the story is..."
+      - Any closing line whose function is to explain rather than to close.
+
+# ---------------------------------------------------------------------------
+# CATEGORIES: swap-in briefs. Classifier picks one; writer gets craft + category.
+# Note that expectations genuinely conflict across categories, which is the
+# point: a calm story is penalised for the stakes an adventure is rewarded for.
+# ---------------------------------------------------------------------------
+
+categories:
+  adventure:
+    emphasis: Physical journey, external obstacle, courage or ingenuity.
+    stakes: Real but never bodily peril. Losing something, being lost, being late.
+    pacing: Brisk. Weight the attempt_and_setback beat.
+    ending: Arrival, discovery, or safe return.
+
+  friendship:
+    emphasis: A social problem between characters. Misunderstanding, exclusion, jealousy.
+    stakes: Emotional. The relationship is what is at risk.
+    pacing: Even. Weight the turn beat, since the change is internal.
+    ending: Repair, and it must cost the protagonist something to achieve.
+
+  bedtime_calm:
+    emphasis: Wind-down. Small, soft, and slow.
+    stakes: Minimal by design. A gentle worry, a small unfinished thing.
+    pacing: Decelerating. Sentences lengthen toward the end.
+    ending: Rest. The final image should be still.
+    inverted_expectation: >
+      High stakes are a DEFECT in this category, not a virtue. The narrative
+      supervisor scores excitement DOWN here. A thrilling bedtime_calm story
+      has missed the request.
+
+  silly:
+    emphasis: Absurdity, wordplay, comic escalation.
+    stakes: Low and played for laughs.
+    pacing: Escalating. Each attempt sillier than the last.
+    ending: A final joke that also resolves the situation.
+    note: The moral requirement is relaxed here but the arc requirement is not.
+
+# ---------------------------------------------------------------------------
+# SUPERVISORS: what each one evaluates. Same vocabulary as craft above, so a
+# critique names something the writer was already briefed on.
+# ---------------------------------------------------------------------------
+
+supervisors:
+
+  age_fit:
+    type: score
+    threshold: 7
+    evaluates:
+      - Vocabulary within reach of the stated age band.
+      - Sentence length and clause depth manageable when read aloud.
+      - Number of simultaneous concepts a child must hold to follow the plot.
+    critique_must:
+      - Quote the specific words or sentences that overshoot.
+      - Propose a concrete replacement, not a general instruction.
+
+  narrative_craft:
+    type: score
+    threshold: 7
+    evaluates:
+      - All five beats present and identifiable.
+      - The setback is real, not token. The resolution is earned by the turn.
+      - Pacing matches the category brief, including inverted expectations.
+    critique_must:
+      - Name which beat is missing or weak by its id.
+      - State what the beat would need to contain to work.
+    scoring_rule: >
+      Test attempt_and_setback and turn the hardest, in that order. If the
+      character's first attempt succeeds, or the obstacle yields without real
+      cost or a change of approach, attempt_and_setback is token and the score
+      MUST be 6 or lower. If the resolution is not earned by something the
+      character learned or chose at the turn, the score MUST be 6 or lower.
+      Pleasant prose does not compensate for an unearned ending.
+
+  moral_integrity:
+    type: score
+    threshold: 7
+    evaluates:
+      - A lesson is present and legible.
+      - It is enacted through the character's choice and its consequences.
+      - It is NOT stated in narration or dialogue as an explanation.
+    critique_must:
+      - If the moral is told, quote the offending line.
+      - Describe the event that could carry the lesson instead.
+    scoring_rule: >
+      Check the closing lines FIRST, before judging anything else. If any
+      forbidden phrasing appears ("And so <character> learned that...",
+      "The moral of the story is...", or any closing line whose function is
+      to explain the lesson rather than close the story), the score MUST be
+      4 or lower, no matter how well the rest of the story enacts the lesson.
+      A stated moral is a failure of this dimension by definition.
+    note: >
+      This supervisor exists because stated morals are the most common failure
+      in generated children's fiction. It is scored separately from narrative
+      craft so that a well-structured story with a tacked-on lesson still fails.
+
+  content_safety:
+    type: veto            # not a score. binary. blocks release regardless of quality.
+    evaluates:
+      - Frightening imagery, threat, or dread disproportionate to the age band.
+      - Cruelty, humiliation, or harm presented without consequence.
+      - Unsafe behaviour modelled approvingly (wandering off, hiding injury, trusting strangers).
+      - Death, illness, or loss handled without care.
+    on_fail:
+      action: block
+      rationale_required: true
+    procedure: >
+      Do not judge the story's overall tone. Instead, list every behaviour the
+      protagonist performs. For each one ask two questions: would a real child
+      aged 5-10 copying this behaviour be at risk, and does the story reward it
+      or leave it without consequence? Sneaking out, going somewhere alone at
+      night, following or trusting a stranger, hiding an injury, and lying to a
+      parent are all blocking behaviours when the story presents them as
+      exciting, clever, or successful. If ANY listed behaviour is risky and
+      rewarded, the verdict is block. A warm, well-written story that models
+      unsafe behaviour approvingly is exactly the case this veto exists for.
+    note: >
+      A veto rather than a score because quality and permissibility are
+      different questions. A beautifully written story can be unusable, and
+      averaging safety into an aggregate would let craft outvote it.
+
+# ---------------------------------------------------------------------------
+# LOOP CONTROL
+# ---------------------------------------------------------------------------
+
+revision:
+  max_iterations: 3
+  stop_when:
+    - All scored supervisors at or above threshold AND safety veto clear.
+    - >-
+      Improvement between iterations is below 1 point on every dimension
+      (diminishing returns: revising further is not converging).
+    - Safety veto fires twice on the same grounds (the request itself may be
+      the problem, not the draft. surface this to the user rather than looping).
+  on_exhaustion: >
+    Return the best draft along with the unmet criteria. Do not silently
+    release a story that failed. Say what it failed and why.
