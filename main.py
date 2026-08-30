@@ -9,9 +9,11 @@ Before submitting the assignment, describe here in a few sentences what you woul
 - A deterministic read-aloud pass (sentence length, clause depth, syllable
   stats computed in Python) feeding age_fit, so the cheapest checks don't
   burn an LLM call.
-- A user feedback turn: "sillier", "shorter", "more about the cat" gets
-  patched into the category brief and re-enters the same revision loop,
-  so feedback is judged by the same supervisors as the first draft.
+- Enforce the rubric's target length deterministically: the word range is
+  in rubric.yaml but nothing checks it, and during testing gpt-3.5 quietly
+  ignored a "make it shorter" feedback request. A plain Python word count
+  feeding a critique into the revision loop would close that gap without
+  spending a judge call.
 """
 
 import argparse
@@ -19,6 +21,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import openai
 import yaml
@@ -295,10 +298,18 @@ SCORED = ["age_fit", "narrative_craft", "moral_integrity"]
 
 
 def judge(rubric: dict, category: str, story: str) -> dict:
-    report = {"scores": {}, "safety": run_safety_supervisor(rubric, category, story)}
-    for name in SCORED:
-        report["scores"][name] = run_scored_supervisor(rubric, name, category, story)
-    return report
+    # The supervisors are independent by design, so they run concurrently:
+    # a judging round costs the slowest judge, not the sum of all four.
+    with ThreadPoolExecutor(max_workers=len(SCORED) + 1) as pool:
+        safety_future = pool.submit(run_safety_supervisor, rubric, category, story)
+        score_futures = {
+            name: pool.submit(run_scored_supervisor, rubric, name, category, story)
+            for name in SCORED
+        }
+        return {
+            "scores": {name: f.result() for name, f in score_futures.items()},
+            "safety": safety_future.result(),
+        }
 
 
 # ---------------------------------------------------------------------------

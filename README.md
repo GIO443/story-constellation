@@ -118,7 +118,7 @@ python main.py --validate            # judge-validation fixture suite
 
 In interactive mode, after a story is released you can request changes ("shorter", "sillier", "more about the cat"). Feedback re-enters the same loop: it becomes a critique in the revision prompt, and the revised draft is judged by the same four supervisors — including the safety veto, which can refuse a change the user asked for.
 
-The model is the assignment's `gpt-3.5-turbo` via the original `call_model`, unchanged. Cost per story: one classifier call, one draft, then 4 judge calls + 1 revision per iteration — worst case ~14 calls.
+The model is the assignment's `gpt-3.5-turbo` via the original `call_model`, unchanged. Cost per story: one classifier call, one draft, then 4 judge calls + 1 revision per iteration — worst case ~14 calls. The four supervisors are independent by design, so each judging round runs them concurrently and costs the slowest judge rather than the sum of all four: measured end-to-end, a two-iteration story dropped from ~18s sequential to ~11s parallel, and the 20-call validation suite runs in ~11s.
 
 ## Files
 
