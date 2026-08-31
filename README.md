@@ -16,7 +16,7 @@ All components are prompt configurations of the assignment's fixed model, invoke
 | Safety supervisor | Binary release veto | gpt-3.5-turbo | 0.0 | 300 | 1 per judging round |
 | Reviser | Apply critiques to draft | gpt-3.5-turbo | 0.7 | 3000 | ≤1 per iteration |
 
-Worst case per story: 1 classify + 1 draft + 3 × (4 judges + 1 revision) = 14 calls.
+Worst case per story: 1 classify + 1 draft + 3 × 4 judges + 2 revisions = 16 calls (no revision follows the final judging round).
 
 ## 2. Block diagram
 
