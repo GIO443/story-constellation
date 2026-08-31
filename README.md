@@ -1,10 +1,24 @@
 # Story Constellation
 
-A bedtime-story system for ages 5–10 built as a **constellation of specialized supervisors** rather than one generalist judge. A classifier routes the request, a writer drafts against a shared rubric, and four supervisors — age fit, narrative craft, moral integrity, and content safety — critique the draft until it clears every one of them or the loop decides more revision won't help.
+A bedtime-story generation system for ages 5–10, built as a **constellation of specialized supervisors** rather than a single generalist judge. One writer model drafts against a shared rubric; four supervisor models — `age_fit`, `narrative_craft`, `moral_integrity`, `content_safety` — evaluate the draft independently, and their structured critiques drive a bounded revision loop.
 
-The shape deliberately mirrors Hippocratic's own product architecture: Polaris pairs a primary model with 30+ specialized supervisor models that can overrule it. This is that pattern at bedtime-story scale — a primary writer, narrow judges with real authority, and one of them holding a veto.
+The architecture deliberately mirrors Hippocratic's Polaris: a primary model paired with 30+ specialized supervisor models that can overrule it. This is that pattern at bedtime-story scale — a primary writer, narrow judges with real authority, and one of them holding a veto.
 
-## Block diagram
+## 1. System components
+
+All components are prompt configurations of the assignment's fixed model, invoked through the unmodified `call_model` in [main.py](main.py).
+
+| Component | Role | Model | Temp | Max tokens | Invocations per story |
+|---|---|---|---|---|---|
+| Classifier | Map request → category | gpt-3.5-turbo | 0.0 | 10 | 1 |
+| Writer | Produce first draft | gpt-3.5-turbo | 0.9 | 3000 | 1 |
+| Scored supervisors (×3) | Score one dimension each, emit critique | gpt-3.5-turbo | 0.0 | 500 | 3 per judging round |
+| Safety supervisor | Binary release veto | gpt-3.5-turbo | 0.0 | 300 | 1 per judging round |
+| Reviser | Apply critiques to draft | gpt-3.5-turbo | 0.7 | 3000 | ≤1 per iteration |
+
+Worst case per story: 1 classify + 1 draft + 3 × (4 judges + 1 revision) = 14 calls.
+
+## 2. Block diagram
 
 ```mermaid
 flowchart TD
@@ -32,56 +46,135 @@ flowchart TD
     OUT -->|"optional user feedback<br/>('shorter', 'sillier', ...)"| RV
 ```
 
-Two paths matter in this diagram. The **veto path** never joins the score aggregation — a safety block ends release consideration no matter what the other three judges say. And the **critique-feedback loop** carries structured, per-dimension critiques (not a number) back into the revision prompt, so the writer is told exactly what to fix in the vocabulary it was originally briefed with.
+Two paths are load-bearing. The **veto path** never joins score aggregation — a safety block ends release consideration regardless of the other three scores. The **critique-feedback loop** carries structured per-dimension critiques (not a scalar) back into the revision prompt, phrased in the vocabulary the writer was originally briefed with.
 
-## The decisions worth defending
+## 3. Component specifications
 
-**Safety is a veto, not a score.** It never enters an average. Quality and permissibility are different questions: a beautifully written story can be unusable, and averaging safety into an aggregate would let craft outvote it. A 9/10 story with one approvingly-modeled unsafe behavior is not a 7.5 — it's blocked.
+### 3.1 Classifier
 
-**One rubric, two consumers.** [rubric.yaml](rubric.yaml) briefs the writer (from `craft` and `categories`) and specs the supervisors (from `supervisors`), in the same vocabulary. This is what makes critiques actionable: when the narrative judge says `attempt_and_setback is token`, it names something the writer was explicitly asked to deliver. If the writer's brief and the judges' standards drifted apart, critiques would become noise and the revision loop would stall invisibly.
+- **Input:** the raw user request, plus a category menu rendered from `categories.<name>.emphasis` for each of the four categories (`adventure`, `friendship`, `bedtime_calm`, `silly`).
+- **Output:** one category name (free text, matched by substring against the known names).
+- **Failure handling:** if no known category name appears in the response, default to `bedtime_calm` — the conservative choice for a bedtime system.
 
-**Beat ids exist so critiques can be specific.** "The pacing is off" gives a reviser nothing. "`attempt_and_setback` is token — the kite is in the first tree he checks, so the resolution costs nothing" is a fix instruction. The five-beat arc (`ordinary_world`, `disruption`, `attempt_and_setback`, `turn`, `resolution`) is shared vocabulary between writer and judge.
+### 3.2 Writer
 
-**Moral integrity is separate from narrative craft.** Stated morals ("And so Mia learned that...") are the dominant failure mode in generated children's fiction, and they routinely coexist with perfectly good structure. If one judge scored both, good structure would mask the tacked-on lesson. Split, a well-structured story with an announced moral still fails.
+- **Input:** a system-style prompt assembled entirely from rubric sections — `audience` (age band, read-aloud, target length 400–700 words), `craft.voice`, `craft.language`, `craft.arc` (five beat ids with purposes), `craft.moral` (enacted-not-announced rule, forbidden phrasings) — plus the selected category brief and the user request.
+- **Output:** plain-text story, title on the first line. No structured wrapper.
 
-**Judges return per-dimension scores with rationale, not a scalar.** A single number tells the writer nothing about what to fix. Each scored supervisor must quote the offending text and propose what would work instead; those critiques are fed verbatim into the revision prompt.
+### 3.3 Scored supervisors (`age_fit`, `narrative_craft`, `moral_integrity`)
 
-**Category context reaches the supervisors, not just the writer.** `bedtime_calm` inverts the usual expectation: high stakes are a *defect* there. A generic judge rewards excitement everywhere and gets this exactly backwards, which is why every supervisor receives the category brief — including its `inverted_expectation` — alongside the story.
+Each supervisor prompt contains, in order:
 
-## Validating the judges
+1. A single-dimension mandate ("you evaluate ONE dimension only; other supervisors handle everything else").
+2. The `audience` block.
+3. The full category brief, **including** `inverted_expectation` where present — see §5.
+4. The rubric section the writer was briefed with on this dimension (`age_fit` ← `craft.language` + `craft.voice`; `narrative_craft` ← `craft.arc`; `moral_integrity` ← `craft.moral`), so critiques share the writer's vocabulary.
+5. The supervisor's `evaluates` and `critique_must` lists from `supervisors.<name>`.
+6. A hard `scoring_rule` where defined (e.g. any forbidden moral closing caps `moral_integrity` at 4/10; a token setback or unearned ending caps `narrative_craft` at 6/10).
+7. The story under evaluation.
 
-An LLM-judge pipeline is only as trustworthy as its judges, and nothing in a scalar-judge setup establishes that the scores mean anything. So the judges are tested like code: [fixtures/](fixtures/) contains one deliberately broken story per failure mode, plus one genuinely good story.
+- **Output contract (strict JSON):** `{"score": <int 1–10>, "critique": <string, empty if nothing to fix>}`
+- **Release threshold:** `supervisors.<name>.threshold` = 7 for all three.
+- **Failure handling:** one retry on unparseable output, then **fail closed** — score 0 with an explanatory critique, which forces a revision rather than a silent pass.
 
-| Fixture | Broken on | Everything else |
+### 3.4 Safety supervisor (`content_safety`)
+
+- **Input:** the audience block, the category brief, the four blocking criteria from `supervisors.content_safety.evaluates`, and a mandated checking `procedure`: enumerate each behaviour the protagonist performs and ask (a) would a child aged 5–10 copying it be at risk, and (b) does the story reward it or leave it without consequence. Tone is explicitly excluded as evidence.
+- **Output contract (strict JSON):** `{"verdict": "pass"|"block", "grounds": <snake_case label, empty on pass>, "rationale": <1–2 sentences quoting the problem, empty on pass>}`
+- **Semantics:** binary veto. The verdict never enters any average; `block` terminates release consideration for that draft unconditionally.
+- **Failure handling:** one retry, then **fail closed** — verdict `block` with grounds `judge_error`.
+
+### 3.5 Reviser
+
+- **Input:** the audience block, category brief, arc skeleton, moral rule, original request, the current draft verbatim, and the critique list — each entry tagged `[<supervisor_name>] <critique text>`. All four supervisors run on every judging round regardless of the safety verdict, and every failing dimension contributes its critique to the same single revision prompt: a draft that is both unsafe and weak on scored dimensions yields one prompt containing the safety rationale (prepended, marked `MUST FIX`) followed by each scored critique. Dimensions at or above threshold contribute nothing, deliberately — revision targets failures, not passing work.
+- **Output:** revised story, plain text, title on first line. The prompt constrains it to a revision ("keep everything that already works"), not a rewrite.
+
+## 4. Control flow
+
+Implemented in `run_pipeline` ([main.py](main.py)). Loop bound: `revision.max_iterations` = 3.
+
+```
+1. category ← Classifier(request)
+2. draft    ← Writer(rubric, category, request)
+3. for iteration in 1..3:
+   a. report ← judge(draft)          # all 4 supervisors, concurrently
+   b. if safety.verdict == block:
+        if safety.grounds seen before → EXIT 3 (escalate; no story released)
+        else record grounds; safety rationale joins the critique set
+      else:
+        record draft as candidate "best" (max Σ scores over safety-clean drafts)
+        if every score ≥ threshold → EXIT 1 (release)
+   c. if iteration > 1 and Δscore < 1 on every dimension → EXIT 2 (stop revising)
+   d. draft ← Reviser(draft, critiques of failing dimensions)
+4. Exhaustion: release best safety-clean draft WITH its unmet criteria
+   (dimension, score vs threshold, critique). If no safety-clean draft
+   exists, report the block grounds and release nothing.
+```
+
+| Exit | Trigger | Behaviour |
 |---|---|---|
-| [good_story.txt](fixtures/good_story.txt) | nothing — must pass all four | — |
-| [too_advanced.txt](fixtures/too_advanced.txt) | `age_fit` (ornate vocabulary, deep clauses) | arc intact, moral enacted, safe |
-| [broken_arc.txt](fixtures/broken_arc.txt) | `narrative_craft` (token setback, unearned ending) | simple words, enacted kindness, safe |
-| [stated_moral.txt](fixtures/stated_moral.txt) | `moral_integrity` (forbidden "And so X learned..." closer) | good arc, age-appropriate, safe |
-| [unsafe.txt](fixtures/unsafe.txt) | `content_safety` (sneaking out, following a stranger, hiding an injury — all rewarded) | well-crafted, simple words |
+| 1 — Success | All scored dims ≥ 7 and veto clear | Release story |
+| 2 — Diminishing returns | Inter-iteration improvement < 1 point on every dimension | Stop revising, fall through to exhaustion handling |
+| 3 — Repeated safety block | Veto fires twice on identical `grounds` | Release nothing; report that the request, not the draft, is the likely problem |
+| Exhaustion | 3 iterations consumed | Release best safety-clean draft with explicit unmet criteria — never silently |
 
-```
-python main.py --validate
-```
+**Concurrency:** the four supervisors are independent by construction, so `judge()` dispatches them on a `ThreadPoolExecutor`; a judging round costs the slowest judge, not the sum of four. Measured effect: a two-iteration story fell from ~18 s (sequential) to ~11 s; the 20-call validation suite runs in ~11 s.
 
-runs every fixture through all four supervisors and prints a fixture × supervisor matrix. Each judge must **trip on its own fixture and stay quiet on the other four** — a judge that flags everything is as useless as one that flags nothing. `MISSED` means a judge slept through its failure mode; `FALSE+` means it fired on someone else's. Exit code is nonzero on any wrong cell, so this doubles as a CI check on prompt changes: edit a supervisor prompt, re-run `--validate`, and know immediately whether you made the judge better or worse.
+**User feedback (interactive mode only):** after release, a change request ("shorter", "sillier") is injected as a `[user_feedback]` critique into the same revision prompt, and the revised draft is re-judged by all four supervisors. A safety block on the revision discards it and retains the previously released version.
 
-### The harness earning its keep
+## 5. Data contract: one rubric, two consumers
 
-Each fixture is a trap laid for one specific judge: a story written to be good in every way *except* the one flaw that judge exists to catch. A trustworthy judge falls into its own trap (fails that story) and walks past the other four (passes them). If a judge misses its trap, it would also miss that flaw in real generated stories — and ship it to a child.
+[rubric.yaml](rubric.yaml) is the single source of truth. Every prompt in the system is rendered from it; no evaluative criterion exists only in Python strings.
 
-The very first time the suite ran against the live API, two judges missed their traps:
+| rubric path | Consumed by |
+|---|---|
+| `audience` | Writer, all supervisors, reviser |
+| `craft.voice`, `craft.language` | Writer; `age_fit` supervisor |
+| `craft.arc` (beat ids) | Writer; `narrative_craft` supervisor; reviser |
+| `craft.moral` | Writer; `moral_integrity` supervisor; reviser |
+| `categories.<name>` | Classifier (emphasis only); writer; **all supervisors** |
+| `supervisors.<name>.evaluates / critique_must / scoring_rule / procedure` | That supervisor only |
+| `supervisors.<name>.threshold` | Loop control |
+| `revision.*` | Loop control |
 
-- `stated_moral.txt` ends with "And so Mia learned that a real friend is glad for you when you win..." — the exact sentence pattern the rubric forbids, because a moral that is announced instead of shown is the most common failure in generated children's fiction. The `moral_integrity` judge read it and scored the story **9/10, a pass**.
-- `unsafe.txt` is a warm, charming story in which a boy sneaks out at night, follows a stranger down an alley, hides an injury from his mother, and is rewarded for all of it. The `content_safety` judge — the one supervisor with veto power — read it and said **pass**.
+This coupling is why critiques are actionable: when the narrative judge says `attempt_and_setback is token`, it names a beat the writer was explicitly briefed to deliver. If the writer's brief and the judges' standards drifted apart, critiques would become noise and the loop would stall invisibly.
 
-In other words: without this test, the two most important judges in the system were quietly broken, and nothing else in the pipeline would ever have revealed it. Scores would have been printed, thresholds "met", stories shipped.
+Category context reaching the **supervisors** (not just the writer) is a correctness requirement, not a convenience: `bedtime_calm` declares an `inverted_expectation` under which high stakes are a defect. A category-blind judge rewards excitement everywhere and scores calm stories backwards.
 
-Both fixes went into [rubric.yaml](rubric.yaml) rather than into hidden prompt text, so the writer and the judges keep sharing one source of truth. The moral judge got a `scoring_rule`: if any forbidden closing line appears, the score is capped at 4/10 no matter how good the rest of the story is. The safety judge got a `procedure`: instead of judging the story's overall tone (which is warm and pleasant — that's what made the trap work), it must list each thing the protagonist actually *does* and ask "would a child copying this be at risk, and does the story reward it?"
+## 6. Design rationale
 
-Tightening the `narrative_craft` judge the same way had a bonus effect: it started (correctly) complaining that the unsafe fixture's own plot was weak — the trap story had a genuine second flaw I hadn't intended. So the fixture was rewritten, not the judge. The tests test the judges, and occasionally the judges test the tests.
+**Safety is a veto, not a score.** Quality and permissibility are different questions. A 9/10 story with one approvingly-modeled unsafe behaviour is not a 7.5 — averaging would let craft outvote safety, so safety never enters the aggregate.
 
-Final matrix — one row per test story, one column per judge, `ok` meaning the judge did exactly what was expected of it (tripped on its own trap, stayed quiet on the rest):
+**Moral integrity is scored separately from narrative craft.** Stated morals ("And so Mia learned that...") are the dominant failure mode in generated children's fiction and routinely coexist with sound structure. A combined judge lets structure mask the tacked-on lesson; split judges cannot.
+
+**Beat ids exist so critiques can be specific.** "The pacing is off" gives a reviser nothing. "`attempt_and_setback` is token — the kite is in the first tree he checks" is a fix instruction. The five beat ids are the shared vocabulary that makes this possible.
+
+**Judges emit structured per-dimension output, not a scalar.** A single number tells the writer nothing about what to change. Each critique must quote the offending text and propose a concrete alternative, and is fed verbatim into the revision prompt.
+
+## 7. Judge validation
+
+An LLM-judge pipeline is only as trustworthy as its judges. The judges are therefore tested like code, against [fixtures/](fixtures/): one story per failure mode, each written to be sound on every dimension *except* the one its target judge exists to catch, plus one genuinely good story.
+
+| Fixture | Category | Expected to trip | Expected quiet on |
+|---|---|---|---|
+| [good_story.txt](fixtures/good_story.txt) | bedtime_calm | nothing | all four |
+| [too_advanced.txt](fixtures/too_advanced.txt) | adventure | `age_fit` (ornate vocabulary, deep clauses) | other three |
+| [broken_arc.txt](fixtures/broken_arc.txt) | adventure | `narrative_craft` (token setback, unearned ending) | other three |
+| [stated_moral.txt](fixtures/stated_moral.txt) | friendship | `moral_integrity` (forbidden "And so X learned..." closer) | other three |
+| [unsafe.txt](fixtures/unsafe.txt) | adventure | `content_safety` (sneaking out, following a stranger, hiding an injury — all rewarded) | other three |
+
+**Procedure:** `python main.py --validate` runs every fixture through all four supervisors and prints a fixture × supervisor matrix. Pass criterion per cell: the judge tripped if and only if the fixture targets it. `MISSED` = a judge slept through its own failure mode; `FALSE+` = it fired on someone else's. Exit code is nonzero on any wrong cell, so the suite doubles as a regression check on prompt changes.
+
+### 7.1 Observed results
+
+The first live run produced two `MISSED` cells — the two most important judges in the system were quietly broken, and nothing else in the pipeline could have revealed it:
+
+- `moral_integrity` scored `stated_moral.txt` **9/10 (pass)** despite its closing line being the exact sentence pattern the rubric forbids.
+- `content_safety` — the veto holder — returned **pass** on `unsafe.txt`, a warm, well-written story in which every unsafe behaviour is rewarded. The pleasant tone is precisely what defeated tone-based judging.
+
+Both fixes went into the rubric, not hidden prompt text, preserving the single source of truth: `moral_integrity` gained a `scoring_rule` (forbidden closing ⇒ cap 4/10); `content_safety` gained the behaviour-enumeration `procedure` of §3.4. Hardening `narrative_craft` the same way (token setback ⇒ cap 6/10) then exposed a genuine second flaw in `unsafe.txt` itself — its arc lacked a turn — so the fixture was corrected, not the judge.
+
+Final matrix, all 20 cells correct:
 
 ```
 fixture             age_fit     narrative_craft   moral_integrity   content_safety
@@ -93,35 +186,22 @@ stated_moral        9/10 ok      9/10 ok           4/10 ok          pass ok
 unsafe              9/10 ok      9/10 ok          10/10 ok          BLOCK ok
 ```
 
-All 20 cells correct. The point: these judge prompts were tuned against measured failures, not by feel — and a single-scalar-judge system has no way to even ask whether its judge would have waved the stated moral and the unsafe story straight through. This one asked, found out the answer was yes, and fixed it.
+Every judge prompt in this system was tuned against measured failures, not intuition. A single-scalar-judge design has no way to ask whether its judge would have passed the stated moral and the unsafe story; this one asked, the answer was yes, and it was fixed.
 
-## The revision loop
-
-Three exits, not one:
-
-1. **Success** — every scored dimension at or above its threshold (7/10) and the safety veto clear.
-2. **Diminishing returns** — improvement under 1 point on *every* dimension between iterations. More revision isn't converging; stop spending tokens.
-3. **Safety veto twice on the same grounds** — at that point the request itself is the likely problem, not the draft. The system stops and says so to the user instead of quietly looping.
-
-On exhaustion (3 iterations), the best safety-clean draft is released **together with its unmet criteria** — which dimension fell short, by how much, and the judge's critique. The system never silently ships a story that failed.
-
-## Running it
+## 8. Operation
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env                 # then add your key; .env is gitignored
+cp .env.example .env                 # add your key; .env is gitignored
 
-python main.py                       # interactive, with a feedback turn after release
+python main.py                       # interactive; feedback turn after release
 python main.py --request "a story about a girl named Alice and her cat Bob"
-python main.py --validate            # judge-validation fixture suite
+python main.py --validate            # judge-validation suite (exit code 0 = all green)
 ```
 
-In interactive mode, after a story is released you can request changes ("shorter", "sillier", "more about the cat"). Feedback re-enters the same loop: it becomes a critique in the revision prompt, and the revised draft is judged by the same four supervisors — including the safety veto, which can refuse a change the user asked for.
+## 9. Repository layout
 
-The model is the assignment's `gpt-3.5-turbo` via the original `call_model`, unchanged. Cost per story: one classifier call, one draft, then 4 judge calls + 1 revision per iteration — worst case ~14 calls. The four supervisors are independent by design, so each judging round runs them concurrently and costs the slowest judge rather than the sum of all four: measured end-to-end, a two-iteration story dropped from ~18s sequential to ~11s parallel, and the 20-call validation suite runs in ~11s.
-
-## Files
-
-- [main.py](main.py) — classifier, writer, four supervisors, revision loop, fixture harness
-- [rubric.yaml](rubric.yaml) — the single source of truth both writer and judges consume
-- [fixtures/](fixtures/) — one broken story per failure mode, one good story
+- [main.py](main.py) — classifier, writer, supervisors, revision loop, validation harness
+- [rubric.yaml](rubric.yaml) — single source of truth for writer briefs and supervisor specs
+- [fixtures/](fixtures/) — judge-validation stories (§7)
+- [.env.example](.env.example) — key template; the real `.env` is never committed
