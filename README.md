@@ -2,7 +2,7 @@
 
 A bedtime-story generation system for ages 5–10, built as a **constellation of specialized supervisors** rather than a single generalist judge. One writer model drafts against a shared rubric; four supervisor models — `age_fit`, `narrative_craft`, `moral_integrity`, `content_safety` — evaluate the draft independently, and their structured critiques drive a bounded revision loop.
 
-The architecture deliberately mirrors Hippocratic's Polaris: a primary model paired with 30+ specialized supervisor models that can overrule it. This is that pattern at bedtime-story scale — a primary writer, narrow judges with real authority, and one of them holding a veto.
+The architecture follows the primary-plus-specialized-supervisor pattern described for Polaris (Hippocratic AI, 2024): a primary model paired with 30+ specialized supervisor models that can overrule it. This is that pattern at bedtime-story scale — a primary writer, narrow judges with real authority, and one of them holding a veto.
 
 ## 1. System components
 
